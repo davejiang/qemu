@@ -132,6 +132,13 @@ const struct AcpiGenericAddress x86_nvdimm_acpi_dsmio = {
     .bit_width = NVDIMM_ACPI_IO_LEN << 3
 };
 
+typedef struct CxlHBDev {
+    uint32_t uid;
+    QSLIST_ENTRY(CxlHBDev) entry;
+} CxlHBDev;
+
+static QSLIST_HEAD(, CxlHBDev) cxl_hb_list_head;
+
 static void init_common_fadt_data(MachineState *ms, Object *o,
                                   AcpiFadtData *data)
 {
@@ -1507,7 +1514,12 @@ build_dsdt(GArray *table_data, BIOSLinker *linker,
             aml_append(dev, aml_name_decl("_UID", aml_int(bus_num)));
             aml_append(dev, aml_name_decl("_BBN", aml_int(bus_num)));
             if (pci_bus_is_cxl(bus)) {
+                CxlHBDev *hb_entry;
                 struct Aml *pkg = aml_package(2);
+
+                hb_entry = g_malloc0(sizeof(*hb_entry));
+                hb_entry->uid = bus_num;
+                QSLIST_INSERT_HEAD(&cxl_hb_list_head, hb_entry, entry);
 
                 aml_append(dev, aml_name_decl("_HID", aml_string("ACPI0016")));
                 aml_append(pkg, aml_eisaid("PNP0A08"));
@@ -1866,6 +1878,7 @@ static void
 build_srat(GArray *table_data, BIOSLinker *linker, MachineState *machine)
 {
     int i;
+    CxlHBDev *hb_entry;
     int numa_mem_start, slots;
     uint64_t mem_len, mem_base, next_base;
     MachineClass *mc = MACHINE_GET_CLASS(machine);
@@ -1972,6 +1985,18 @@ build_srat(GArray *table_data, BIOSLinker *linker, MachineState *machine)
     }
 
     sgx_epc_build_srat(table_data);
+
+    QSLIST_FOREACH(hb_entry, &cxl_hb_list_head, entry)
+    {
+        ACPIDeviceHandle handle = {
+            .hid = "ACPI0016",
+            .uid = hb_entry->uid,
+        };
+        uint32_t flags = GEN_AFFINITY_ENABLED;
+
+        build_srat_generic_port_affinity(table_data, 0, nb_numa_nodes,
+                                         &handle, flags);
+    }
 
     /*
      * TODO: this part is not in ACPI spec and current linux kernel boots fine
@@ -2727,6 +2752,8 @@ void acpi_setup(void)
         ACPI_BUILD_DPRINTF("ACPI disabled. Bailing out.\n");
         return;
     }
+
+    QSLIST_INIT(&cxl_hb_list_head);
 
     build_state = g_malloc0(sizeof *build_state);
 
